@@ -1,5 +1,5 @@
 // core.h - shared types, image I/O, seam utilities, timing, CSV and the test framework.
-// Owner: P1. Every other module includes this file and nothing else from the project.
+// Owner: Henrey. Every other module includes this file and nothing else from the project.
 //
 // Conventions used across the project:
 //   - A Grid is indexed (row, column) = (r, c) and has height h and width w.

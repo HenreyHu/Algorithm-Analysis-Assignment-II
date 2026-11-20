@@ -1,5 +1,5 @@
 // run_tests.cpp - runs every SC_TEST that the present module headers register.
-// Owner: P1. Modules are picked up automatically, so adding one never edits this file.
+// Owner: Henrey. Modules are picked up automatically, so adding one never edits this file.
 //
 //   run_tests [--filter PREFIX] [--csv PATH]
 //
