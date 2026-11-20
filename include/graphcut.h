@@ -1,5 +1,5 @@
 // graphcut.h - seam finding as a minimum s-t cut, solved by maximum flow (brief 4). Owner: Zafir.
-// Solvers from the max-flow lecture: Ford-Fulkerson (DFS) and Edmonds-Karp (BFS).
+// Solvers from the max-flow lecture: Ford-Fulkerson (DFS), Edmonds-Karp (BFS) and Dinic.
 //
 // Graph model for a vertical seam on an h x w energy map:
 //   - Pad one dummy column (energy 0) on the right, so W = w + 1. Without it the last real column
@@ -25,7 +25,7 @@
 // one-to-one correspondence). Only the structural tests GC1/GC2 notice if they are missing.
 //
 // Complexity: n = hw + 2 nodes, m ~ 5hw edge pairs. FF is O(f m) with f up to 2040h,
-// Edmonds-Karp O(n m^2): both far slower than DP's Theta(hw) for the same seam.
+// Edmonds-Karp O(n m^2), Dinic O(n^2 m): all far slower than DP's Theta(hw) for the same seam.
 #pragma once
 
 #include <tuple>
@@ -173,6 +173,60 @@ inline int64_t maxflow_ek(FlowGraph& g, Stats& st) {
     }
 }
 
+// Dinic: per phase, BFS levels from s, then a blocking flow using only edges that go one level
+// deeper. The DFS is iterative (paths can be long) and keeps a current-arc pointer it[u], so each
+// edge is skipped at most once per phase. O(n^2 m).
+inline int64_t maxflow_dinic(FlowGraph& g, Stats& st) {
+    int64_t flow = 0;
+    std::vector<int> level(g.n), it(g.n), queue, path;
+    while (true) {
+        std::fill(level.begin(), level.end(), -1);
+        level[g.s] = 0;
+        queue.assign(1, g.s);
+        for (size_t q = 0; q < queue.size(); ++q) {
+            int u = queue[q];
+            ++st.bfs_visits;
+            for (int e = g.head[u]; e != -1; e = g.nxt[e])
+                if (g.cap[e] > 0 && level[g.to[e]] < 0) {
+                    level[g.to[e]] = level[u] + 1;
+                    queue.push_back(g.to[e]);
+                }
+        }
+        if (level[g.t] < 0) return flow;
+        ++st.phases;
+        it = g.head;
+        path.clear();
+        int u = g.s;
+        while (true) {
+            if (u == g.t) {
+                int64_t x = detail::bottleneck(g, path);
+                detail::augment(g, path, x);
+                flow += x;
+                ++st.augment;
+                // Retreat to the tail of the first saturated edge and continue from there.
+                size_t k = 0;
+                while (g.cap[path[k]] > 0) ++k;
+                u = g.tail(path[k]);
+                path.resize(k);
+                continue;
+            }
+            int& e = it[u];
+            while (e != -1 && !(g.cap[e] > 0 && level[g.to[e]] == level[u] + 1)) e = g.nxt[e];
+            if (e != -1) {
+                path.push_back(e);
+                u = g.to[e];
+            } else {
+                if (u == g.s) break;  // blocking flow reached
+                level[u] = -1;        // dead end: never enter u again in this phase
+                int back = path.back();
+                path.pop_back();
+                u = g.tail(back);
+                it[u] = g.nxt[it[u]];
+            }
+        }
+    }
+}
+
 // Nodes reachable from s in the residual graph: the source side S of a minimum cut.
 inline std::vector<char> source_side(const FlowGraph& g) {
     std::vector<char> S(g.n, 0);
@@ -248,6 +302,7 @@ Seam cut_seam(const Energy& e, Stats& st, Solver solve) {
 
 inline Seam ff_seam(const Energy& e, Stats& st) { return detail::cut_seam(e, st, maxflow_ff); }
 inline Seam ek_seam(const Energy& e, Stats& st) { return detail::cut_seam(e, st, maxflow_ek); }
+inline Seam dinic_seam(const Energy& e, Stats& st) { return detail::cut_seam(e, st, maxflow_dinic); }
 
 }  // namespace sc
 
@@ -260,7 +315,7 @@ inline Seam ek_seam(const Energy& e, Stats& st) { return detail::cut_seam(e, st,
 namespace sc {
 
 using MaxFlow = int64_t (*)(FlowGraph&, Stats&);
-const std::pair<const char*, MaxFlow> kSolvers[] = {{"ff", maxflow_ff}, {"ek", maxflow_ek}};
+const std::pair<const char*, MaxFlow> kSolvers[] = {{"ff", maxflow_ff}, {"ek", maxflow_ek}, {"dinic", maxflow_dinic}};
 
 SC_TEST(GC1, "edge-pair count == h(2 + 2(W-1)) + 2(h-1)(W-1), padded and unpadded") {
     for (auto [h, w] : {std::pair{1, 1}, std::pair{1, 5}, std::pair{3, 1}, std::pair{4, 6}, std::pair{7, 7}})
@@ -314,7 +369,7 @@ void for_flow_grids(F f) {
     for (int t = 0; t < 500; ++t) f(random_energy(rng, dim(rng), dim(rng), t % 2 ? 3 : 2040));
 }
 
-SC_TEST(GC4, "FF == EK == brute-force optimum (500 random grids)") {
+SC_TEST(GC4, "FF == EK == Dinic == brute-force optimum (500 random grids)") {
     for_flow_grids([](const Energy& e) {
         Stats st;
         int64_t best = seam_cost(e, brute_seam(e, st));
@@ -340,7 +395,7 @@ SC_TEST(GC5, "flow certificate holds for every solver, and fails on a tampered f
             tampered_rejected += !verify_flow(sg.g).ok;
         }
     });
-    SC_CHECK_EQ(tampered_rejected, 2 * 500);
+    SC_CHECK_EQ(tampered_rejected, 3 * 500);
 }
 
 SC_TEST(GC6, "the cut seam is valid and its cost == the flow value (every solver)") {
@@ -360,9 +415,20 @@ SC_TEST(GC6, "the cut seam is valid and its cost == the flow value (every solver
     }
 }
 
+SC_TEST(GC7, "32x32: Edmonds-Karp and Dinic seams cost the same as DP") {
+    std::mt19937 rng(507);
+    for (int t = 0; t < 3; ++t) {
+        Energy e = random_energy(rng, 32, 32, 2040);
+        Stats st;
+        int64_t d = seam_cost(e, dp_seam(e, st));
+        SC_CHECK_EQ(seam_cost(e, dinic_seam(e, st)), d);
+        SC_CHECK_EQ(seam_cost(e, ek_seam(e, st)), d);
+    }
+}
+
 SC_TEST(GC8, "edge cases: w=1 gives all zeros; h=1 gives the minimum column") {
     std::mt19937 rng(508);
-    for (auto solve : {ff_seam, ek_seam}) {
+    for (auto solve : {ff_seam, ek_seam, dinic_seam}) {
         Stats st;
         SC_CHECK_EQ(solve(random_energy(rng, 6, 1, 2040), st), Seam(6, 0));
         Energy row = random_energy(rng, 1, 9, 2040);
@@ -376,14 +442,16 @@ SC_TEST(GC9, "work counters are filled; FF needs at least as many augmenting pat
     bool ff_at_least_ek = false;
     for (int t = 0; t < 5; ++t) {
         Energy e = random_energy(rng, 16, 16, 2040);
-        Stats ff, ek;
+        Stats ff, ek, dinic;
         ff_seam(e, ff);
         ek_seam(e, ek);
-        for (const Stats* s : {&ff, &ek}) {
+        dinic_seam(e, dinic);
+        for (const Stats* s : {&ff, &ek, &dinic}) {
             SC_CHECK(s->augment > 0);
             SC_CHECK(s->bfs_visits > 0);
             SC_CHECK(s->cells > 0);
         }
+        SC_CHECK(dinic.phases > 0);
         ff_at_least_ek |= ff.augment >= ek.augment;
     }
     SC_CHECK(ff_at_least_ek);
